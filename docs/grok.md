@@ -11,7 +11,12 @@ read_when:
 Grok uses xAI's official Grok Build CLI (`grok`, released 2026-05-14). Usage data is
 fetched via the ACP JSON-RPC `x.ai/billing` extension method over `grok agent stdio`
 when available, then via grok.com's billing gRPC-web endpoint using the signed-in
-browser session when the CLI surface does not expose billing.
+browser session when the CLI surface does not expose billing. Local session
+signals under `~/.grok/sessions` always contribute token totals, and are the
+last-resort fetch source when remote billing fails.
+
+**This fork enables Grok by default** so it tracks next to Codex and Claude without
+opening Settings → Providers first.
 
 ## Data sources + fallback order
 
@@ -131,15 +136,17 @@ Each session directory contains `signals.json` with fields like:
   "contextTokensUsed": 2968,
   "contextWindowTokens": 512000,
   "totalTokensBeforeCompaction": 0,
-  "modelsUsed": ["grok-build"],
-  "primaryModelId": "grok-build",
+  "modelsUsed": ["grok-4.5"],
+  "primaryModelId": "grok-4.5",
   "sessionDurationSeconds": 47
 }
 ```
 
-CodexBar aggregates these into a `GrokLocalSessionSummary` (session count, total
-tokens, last session time, primary model) and exposes it for diagnostics even when
-the RPC path is unavailable.
+CodexBar aggregates these into a `GrokLocalSessionSummary` (session count, today /
+7d / 30d tokens, last session time, primary model). The summary is attached as
+`providerCost` (`currencyCode: "tok"`) on every Grok snapshot, and powers the
+`grok.local` last-resort strategy so the provider never goes blank when you have
+local sessions but no remote billing.
 
 ## Status
 

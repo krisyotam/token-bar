@@ -17,7 +17,9 @@ public enum GrokProviderDescriptor {
                 creditsHint: "",
                 toggleTitle: "Show Grok usage",
                 cliName: "grok",
-                defaultEnabled: false,
+                // Enabled by default so Grok tracks alongside Codex/Claude without
+                // digging through Settings → Providers first.
+                defaultEnabled: true,
                 isPrimaryProvider: false,
                 usesAccountFallback: false,
                 browserCookieOrder: ProviderBrowserCookieDefaults.grokCookieImportOrder,
@@ -35,8 +37,12 @@ public enum GrokProviderDescriptor {
                     ProviderColor(hex: 0xFDFDFD),
                 ]),
             tokenCost: ProviderTokenCostConfig(
-                supportsTokenCost: false,
-                noDataMessage: { "Grok cost summary is not supported yet." }),
+                // Local session token totals surface via ProviderCostSnapshot
+                // (currency "tok") from ~/.grok/sessions/**/signals.json.
+                supportsTokenCost: true,
+                noDataMessage: {
+                    "No local Grok session tokens yet. Use the Grok Build CLI, then re-open CodexBar."
+                }),
             pace: ProviderPaceCapability(resetWindowPace: .custom { window, now in
                 guard Self.primaryLabel(window: window, now: now) == "Weekly",
                       let resetsAt = window.resetsAt
@@ -58,11 +64,14 @@ public enum GrokProviderDescriptor {
     private static func resolveStrategies(context: ProviderFetchContext) async -> [any ProviderFetchStrategy] {
         switch context.sourceMode {
         case .auto:
-            [GrokCLIFetchStrategy(), GrokWebFetchStrategy()]
+            // CLI billing → web billing → local ~/.grok/sessions tokens.
+            [GrokCLIFetchStrategy(), GrokWebFetchStrategy(), GrokLocalFetchStrategy()]
         case .cli:
-            [GrokCLIFetchStrategy()]
+            // Local last so `codexbar usage --provider grok --source cli` still
+            // shows something when agent-stdio billing is Method-not-found.
+            [GrokCLIFetchStrategy(), GrokLocalFetchStrategy()]
         case .web:
-            [GrokWebFetchStrategy()]
+            [GrokWebFetchStrategy(), GrokLocalFetchStrategy()]
         case .api, .oauth:
             []
         }
@@ -273,6 +282,36 @@ struct GrokWebFetchStrategy: ProviderFetchStrategy {
         return [credentials, nil]
     }
     #endif
+
+    func shouldFallback(on _: Error, context: ProviderFetchContext) -> Bool {
+        // Allow the local-session strategy to run when remote billing is unavailable.
+        context.sourceMode == .auto || context.sourceMode == .web
+    }
+}
+
+/// Last-resort strategy: identity from `~/.grok/auth.json` + token totals from
+/// local Grok Build session `signals.json` files. No network.
+struct GrokLocalFetchStrategy: ProviderFetchStrategy {
+    let id: String = "grok.local"
+    let kind: ProviderFetchKind = .cli
+
+    func isAvailable(_ context: ProviderFetchContext) async -> Bool {
+        let authExists = FileManager.default.fileExists(
+            atPath: GrokCredentialsStore.authFileURL(env: context.env).path)
+        if authExists { return true }
+        let sessionsRoot = GrokCredentialsStore.grokHomeURL(env: context.env)
+            .appendingPathComponent("sessions", isDirectory: true)
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: sessionsRoot.path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
+        let snap = try GrokStatusProbe.localFallbackSnapshot(env: context.env)
+        return self.makeResult(
+            usage: snap.toUsageSnapshot(),
+            sourceLabel: "grok-local",
+            diagnostic: snap.displayDiagnostic)
+    }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {
         false

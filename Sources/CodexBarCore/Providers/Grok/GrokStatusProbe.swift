@@ -55,12 +55,30 @@ public struct GrokUsageSnapshot: Sendable {
             accountOrganization: self.credentials?.teamId,
             loginMethod: self.credentials?.loginMethod)
 
+        // Always surface local Grok Build session tokens when available so the
+        // menu bar still tracks Grok even when remote billing is down / unsupported.
+        let localCost = self.localSummary?.providerCostSnapshot(updatedAt: self.updatedAt)
+
         return UsageSnapshot(
             primary: primary,
             secondary: nil,
             tertiary: nil,
+            providerCost: localCost,
             updatedAt: self.updatedAt,
-            identity: identity)
+            identity: identity,
+            dataConfidence: primary != nil ? .percentOnly : (localCost != nil ? .estimated : .unknown))
+    }
+
+    /// Diagnostic string preferred for CLI / verbose consumers (remote + local).
+    public var displayDiagnostic: String? {
+        let remote = self.diagnostic?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let local = self.localSummary?.hasActivity == true ? self.localSummary?.diagnosticLine : nil
+        switch (remote?.isEmpty == false ? remote : nil, local) {
+        case let (r?, l?): return "\(r) · \(l)"
+        case let (r?, nil): return r
+        case let (nil, l?): return l
+        default: return nil
+        }
     }
 }
 
@@ -110,10 +128,10 @@ public struct GrokStatusProbe: Sendable {
         let localSummary = GrokLocalSessionScanner.summarize(env: env)
         let cliVersion = Self.detectVersion(env: env)
 
-        // `localSummary` is *not* currently projected into a visible RateWindow or
-        // identity field, so a stale `~/.grok/sessions/` directory must not
-        // suppress the auth-required hint. CLI-only fetches need a billing
-        // response; the provider pipeline owns the separate web fallback.
+        // Team principals: identity-only when the billing method is missing (no
+        // supported team usage surface yet). Personal principals still fall through
+        // to the web strategy in auto mode; local-session fallback is a separate
+        // strategy so remote billing still gets a chance first.
         if billing == nil,
            let credentials,
            Self.shouldUseIdentityOnlyFallback(
@@ -141,6 +159,33 @@ public struct GrokStatusProbe: Sendable {
             localSummary: localSummary,
             cliVersion: cliVersion,
             updatedAt: Date())
+    }
+
+    /// Offline snapshot from `~/.grok/auth.json` + local session signals.
+    /// Used as the last-resort strategy when CLI billing RPC and web billing both fail.
+    public static func localFallbackSnapshot(
+        env: [String: String] = ProcessInfo.processInfo.environment) throws -> GrokUsageSnapshot
+    {
+        let credentials = try? GrokCredentialsStore.load(env: env)
+        let localSummary = GrokLocalSessionScanner.summarize(env: env)
+        let cliVersion = Self.detectVersion(env: env)
+
+        guard localSummary.hasActivity || credentials != nil else {
+            throw GrokRPCError.notAuthenticated
+        }
+
+        // Keep identity even when the access token is expired — local session
+        // totals still track "your" Grok usage from ~/.grok/sessions.
+        return GrokUsageSnapshot(
+            billing: nil,
+            webBilling: nil,
+            credentials: credentials,
+            localSummary: localSummary,
+            cliVersion: cliVersion,
+            updatedAt: Date(),
+            diagnostic: localSummary.hasActivity
+                ? nil
+                : "No remote Grok billing available; run `grok login` or sign in at grok.com.")
     }
 
     static func identityOnlySnapshot(
